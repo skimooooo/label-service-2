@@ -1,16 +1,14 @@
 """
-HEYBIKE / TrackFlow shipping-label image compositor
-Updated for the NEW warehouse-floor base photo.
+HEYBIKE / TrackFlow shipping-label compositor
+Fixed for the NEW warehouse-floor base photo.
 
-This version:
-- uses base.png from the same folder as label_gen.py
-- is calibrated for the new base image
-- keeps the barcode locked from the base image
-- keeps SHIP FROM fixed from the base photo
-- only redraws:
-  1) SHIP TO block
-  2) tracking row text
-- applies a soft low-quality phone-photo look to hide AI-like flaws
+Fixes:
+- Correct label corners
+- No giant wrong patch over the label
+- Only patches SHIP TO text and tracking code
+- Keeps barcode locked from base image
+- Keeps base.png path compatible with Render
+- Applies slight blur/compression for realistic phone-photo look
 """
 
 import os
@@ -23,32 +21,28 @@ from PIL import Image, ImageDraw, ImageFont
 # CONFIG
 # ---------------------------------------------------------------------------
 
-# Important Render fix:
-# This makes sure base.png is loaded from the same folder as label_gen.py
 BASE_IMAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "base.png")
 
-# New label position for the latest base photo
+# Correct label corners for the latest base.png
 # Order: top-left, top-right, bottom-right, bottom-left
 LABEL_CORNERS = np.array([
-    [648, 164],
-    [999, 166],
-    [1008, 315],
-    [641, 313],
+    [640, 201],
+    [889, 199],
+    [918, 315],
+    [608, 314],
 ], dtype=np.float32)
 
-# Internal flat label coordinate system
 LABEL_W = 1000
 LABEL_H = 540
 
-# Editable regions inside the flat label coordinates
-# Right address block
-SHIP_TO_RECT = (535, 92, 885, 235)
+# Only patch the right SHIP TO area
+SHIP_TO_RECT = (490, 145, 930, 340)
 
-# Tracking row above barcode
-TRACKING_ROW_RECT = (60, 250, 935, 322)
+# Only patch the old tracking code text, not the whole barcode section
+TRACKING_CODE_RECT = (250, 398, 660, 445)
 
-# Locked barcode area copied from base photo as final step
-BARCODE_LOCK_RECT = (118, 334, 895, 492)
+# Barcode area copied from the original base photo as the final step
+BARCODE_LOCK_RECT = (85, 452, 930, 540)
 
 FONT_DIR = "/usr/share/fonts/truetype/liberation"
 FONT_BOLD = f"{FONT_DIR}/LiberationSans-Bold.ttf"
@@ -104,21 +98,22 @@ def _image_to_label_matrix() -> np.ndarray:
 
 
 def _sample_paper_color(base_bgr: np.ndarray):
-    """
-    Sample the white paper tone from clean blank areas of the label
-    in flattened label coordinates.
-    """
-    M = _image_to_label_matrix()
-    flat = cv2.warpPerspective(base_bgr, M, (LABEL_W, LABEL_H), flags=cv2.INTER_CUBIC)
+    """Sample label paper color from clean areas of the flattened label."""
+    flat = cv2.warpPerspective(
+        base_bgr,
+        _image_to_label_matrix(),
+        (LABEL_W, LABEL_H),
+        flags=cv2.INTER_CUBIC
+    )
 
     sample_points = [
-        (135, 60),
-        (910, 60),
-        (85, 185),
-        (930, 185),
-        (90, 510),
-        (920, 510),
-        (955, 290),
+        (930, 80),
+        (920, 370),
+        (460, 135),
+        (430, 375),
+        (75, 360),
+        (760, 390),
+        (950, 430),
     ]
 
     samples = []
@@ -129,21 +124,19 @@ def _sample_paper_color(base_bgr: np.ndarray):
             samples.append((int(r), int(g), int(b)))
 
     if not samples:
-        return (228, 229, 232)
+        return (230, 230, 233)
 
     arr = np.array(samples, dtype=np.float32)
     median = np.median(arr, axis=0)
 
     gray = median.mean()
-    final = median * 0.85 + gray * 0.15
+    final = median * 0.88 + gray * 0.12
 
     return tuple(int(v) for v in final)
 
 
 def _paper_patch(size, paper_rgb, seed=7):
-    """
-    Create a realistic paper patch with light texture and soft feathered edges.
-    """
+    """Create a realistic paper patch with light texture and soft edges."""
     w, h = size
     rng = np.random.default_rng(seed)
 
@@ -153,22 +146,18 @@ def _paper_patch(size, paper_rgb, seed=7):
     patch[:, :, 1] = paper_rgb[1]
     patch[:, :, 2] = paper_rgb[2]
 
-    # Light paper noise
-    noise = rng.normal(0, 1.15, (h, w, 1))
-    rgb = np.clip(
+    noise = rng.normal(0, 0.9, (h, w, 1))
+    patch[:, :, :3] = np.clip(
         patch[:, :, :3].astype(np.float32) + noise,
         0,
         255
     ).astype(np.uint8)
 
-    patch[:, :, :3] = rgb
-
-    # Soft alpha edges so the patch does not look like a hard rectangle
-    alpha = np.ones((h, w), dtype=np.float32) * 255.0
-    feather = 7
+    alpha = np.ones((h, w), dtype=np.float32) * 255
+    feather = 6
 
     for i in range(feather):
-        a = 255.0 * ((i + 1) / feather)
+        a = 255 * ((i + 1) / feather)
 
         alpha[i, :] = np.minimum(alpha[i, :], a)
         alpha[h - 1 - i, :] = np.minimum(alpha[h - 1 - i, :], a)
@@ -211,10 +200,6 @@ def _draw_wrapped(draw, xy, text, font, fill, max_width, line_h):
 
 
 def normalize_tracking(tracking_number: str | None) -> str:
-    """
-    Normalize to TF-XXXXXXXXXX style.
-    Supports alphanumeric codes.
-    """
     raw = (tracking_number or "").strip().upper()
     raw = re.sub(r"[^A-Z0-9-]", "", raw)
 
@@ -234,28 +219,24 @@ def normalize_tracking(tracking_number: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 def build_label_overlay(recipient: dict, tracking_number: str, paper_rgb):
-    """
-    Build transparent overlay that patches only the dynamic areas.
-    """
     overlay = Image.new("RGBA", (LABEL_W, LABEL_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    f_label = _load_font(FONT_BOLD, 19)
+    f_label = _load_font(FONT_BOLD, 18)
     f_text = _load_font(FONT_REG, 17)
     f_text_bold = _load_font(FONT_BOLD, 17)
-    f_tracking_label = _load_font(FONT_BOLD, 17)
     f_tracking = _load_font(FONT_REG, 15)
 
-    # -------------------------------------------------------------
-    # SHIP TO block
-    # -------------------------------------------------------------
+    # -----------------------------
+    # SHIP TO block only
+    # -----------------------------
     _paste_paper_rect(overlay, SHIP_TO_RECT, paper_rgb, seed=11)
 
-    tx = 555
-    ty = 105
+    tx = 520
+    ty = 160
 
     draw.text((tx, ty), "SHIP TO:", font=f_label, fill=TEXT_COLOR + (255,))
-    ty += 24
+    ty += 26
 
     fields = [
         recipient.get("name", ""),
@@ -275,27 +256,30 @@ def build_label_overlay(recipient: dict, tracking_number: str, paper_rgb):
     if country:
         fields.append(country)
 
-    if recipient.get("phone"):
-        fields.append(recipient.get("phone", ""))
+    phone = recipient.get("phone", "")
+
+    if phone:
+        fields.append(phone)
 
     total_chars = sum(len(x) for x in fields)
 
     if total_chars > 100 or len(fields) > 5:
         f_text_use = _load_font(FONT_REG, 15)
-        f_text_first = _load_font(FONT_BOLD, 15)
+        f_first_use = _load_font(FONT_BOLD, 15)
         line_h = 18
     else:
         f_text_use = f_text
-        f_text_first = f_text_bold
-        line_h = 20
+        f_first_use = f_text_bold
+        line_h = 21
 
-    max_w = 290
+    max_w = 340
 
     for i, line in enumerate(fields):
         if not line:
             continue
 
-        font = f_text_first if i == 0 else f_text_use
+        font = f_first_use if i == 0 else f_text_use
+
         ty = _draw_wrapped(
             draw,
             (tx, ty),
@@ -306,28 +290,15 @@ def build_label_overlay(recipient: dict, tracking_number: str, paper_rgb):
             line_h
         )
 
-    # -------------------------------------------------------------
-    # TRACKING ROW
-    # -------------------------------------------------------------
-    _paste_paper_rect(overlay, TRACKING_ROW_RECT, paper_rgb, seed=12)
+    # -----------------------------
+    # Tracking code only
+    # -----------------------------
+    _paste_paper_rect(overlay, TRACKING_CODE_RECT, paper_rgb, seed=12)
 
     trk = normalize_tracking(tracking_number)
 
-    x0, y0, x1, y1 = TRACKING_ROW_RECT
-    row_y = y0 + 18
-
     draw.text(
-        (82, row_y),
-        "TRACKING NO.:",
-        font=f_tracking_label,
-        fill=TEXT_COLOR + (255,)
-    )
-
-    # Tracking code on the same row, subtle printed style
-    trk_x = 310
-
-    draw.text(
-        (trk_x, row_y),
+        (270, 414),
         trk,
         font=f_tracking,
         fill=SUBTLE_TEXT_COLOR + (255,)
@@ -344,18 +315,15 @@ def warp_overlay_to_image(overlay_rgba: Image.Image, base_shape):
     h, w = base_shape[:2]
     overlay_np = np.array(overlay_rgba)
 
-    M = _label_to_image_matrix()
-
     warped = cv2.warpPerspective(
         overlay_np,
-        M,
+        _label_to_image_matrix(),
         (w, h),
         flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT
     )
 
-    # Tiny blur so the text looks printed/photo-like
-    warped = cv2.GaussianBlur(warped, (3, 3), 0.3)
+    warped = cv2.GaussianBlur(warped, (3, 3), 0.25)
 
     return warped
 
@@ -375,23 +343,17 @@ def alpha_composite_bgr(base_bgr: np.ndarray, overlay_rgba: np.ndarray) -> np.nd
 
 
 def apply_photo_realism(img_bgr: np.ndarray) -> np.ndarray:
-    """
-    Slightly degrade the image so it feels like a real warehouse phone photo.
-    """
     if not APPLY_REALISM_PASS:
         return img_bgr
 
     h, w = img_bgr.shape[:2]
 
-    # Slight blur
     img = cv2.GaussianBlur(img_bgr, (5, 5), 0.75)
 
-    # Flatten contrast slightly
     img_f = img.astype(np.float32)
     img_f = img_f * 0.978 + 128 * 0.022
     img = np.clip(img_f, 0, 255).astype(np.uint8)
 
-    # Subtle downscale/upscale softness
     small = cv2.resize(
         img,
         (int(w * 0.94), int(h * 0.94)),
@@ -404,7 +366,6 @@ def apply_photo_realism(img_bgr: np.ndarray) -> np.ndarray:
         interpolation=cv2.INTER_LINEAR
     )
 
-    # JPEG recompression adds realistic harshness on zoom
     ok, encoded = cv2.imencode(
         ".jpg",
         img,
@@ -418,11 +379,6 @@ def apply_photo_realism(img_bgr: np.ndarray) -> np.ndarray:
 
 
 def paste_locked_barcode_last(result_bgr: np.ndarray, base_bgr: np.ndarray) -> np.ndarray:
-    """
-    Copy the original barcode pixels from the base image as the FINAL step.
-    """
-    M = _label_to_image_matrix()
-
     x0, y0, x1, y1 = BARCODE_LOCK_RECT
 
     flat_pts = np.array([
@@ -432,7 +388,10 @@ def paste_locked_barcode_last(result_bgr: np.ndarray, base_bgr: np.ndarray) -> n
         [[x0, y1]],
     ], dtype=np.float32)
 
-    img_pts = cv2.perspectiveTransform(flat_pts, M).reshape(-1, 2).astype(np.int32)
+    img_pts = cv2.perspectiveTransform(
+        flat_pts,
+        _label_to_image_matrix()
+    ).reshape(-1, 2).astype(np.int32)
 
     mask = np.zeros(result_bgr.shape[:2], dtype=np.uint8)
     cv2.fillConvexPoly(mask, img_pts, 255)
@@ -469,10 +428,10 @@ def generate_label(
 
     result_bgr = alpha_composite_bgr(base_bgr, warped_overlay)
 
-    # Apply global realism before locking barcode
+    # Apply global realism first
     result_bgr = apply_photo_realism(result_bgr)
 
-    # Final step: restore original barcode
+    # Barcode restored as final operation
     result_bgr = paste_locked_barcode_last(result_bgr, base_bgr)
 
     result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
