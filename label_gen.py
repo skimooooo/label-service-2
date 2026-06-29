@@ -1,18 +1,16 @@
 """
-HEYBIKE / TrackFlow shipping-label image compositor.
+HEYBIKE / TrackFlow shipping-label image compositor
+Updated for the NEW warehouse-floor base photo.
 
-This version is adapted for the HEYBIKE warehouse base photo.
-It does NOT redraw the full label. It patches only:
-- SHIP TO address block
-- tracking number text under the barcode
-
-The SHIP FROM block remains fixed in the base photo.
-The barcode remains static by copying the barcode pixels from the base photo
-as the final operation.
-
-This version also makes the final output look slightly softer / lower quality
-so the label feels more like a real warehouse phone photo and less like a
-clean AI edit.
+This version:
+- uses base.png
+- is calibrated for the new base image
+- keeps the barcode locked from the base image
+- keeps SHIP FROM fixed from the base photo
+- only redraws:
+  1) SHIP TO block
+  2) tracking row text
+- applies a soft low-quality phone-photo look to hide AI-like flaws
 """
 
 import os
@@ -27,46 +25,44 @@ from PIL import Image, ImageDraw, ImageFont
 
 BASE_IMAGE_PATH = "base.png"
 
-# Label corners in the HEYBIKE base photo, in image pixel coordinates:
-# top-left, top-right, bottom-right, bottom-left
+# New label position for the latest base photo
+# Order: top-left, top-right, bottom-right, bottom-left
 LABEL_CORNERS = np.array([
-    [524, 180],
-    [963, 179],
-    [1014, 447],
-    [496, 453],
+    [648, 164],
+    [999, 166],
+    [1008, 315],
+    [641, 313],
 ], dtype=np.float32)
 
-# Flat label coordinate system used internally
+# Internal flat label coordinate system
 LABEL_W = 1000
 LABEL_H = 540
 
-# Editable regions in flat-label coordinates
-# Slightly expanded to cover the original printed text more cleanly
-SHIP_TO_RECT = (500, 125, 960, 355)        # x0, y0, x1, y1
-TRACKING_TEXT_RECT = (135, 488, 535, 532)  # number below barcode only
+# Editable regions inside the flat label coordinates
+# Right address block
+SHIP_TO_RECT = (535, 92, 885, 235)
 
-# Locked barcode area in flat-label coordinates
-# Copied from base photo as the FINAL step
-BARCODE_LOCK_RECT = (70, 392, 555, 490)
+# Tracking row above barcode
+TRACKING_ROW_RECT = (60, 250, 935, 322)
 
-# Font paths
+# Locked barcode area copied from base photo as final step
+BARCODE_LOCK_RECT = (118, 334, 895, 492)
+
 FONT_DIR = "/usr/share/fonts/truetype/liberation"
 FONT_BOLD = f"{FONT_DIR}/LiberationSans-Bold.ttf"
 FONT_REG = f"{FONT_DIR}/LiberationSans-Regular.ttf"
 
-TEXT_COLOR = (25, 25, 30)
-PAPER_ALPHA = 255
+TEXT_COLOR = (28, 28, 32)
+SUBTLE_TEXT_COLOR = (65, 65, 70)
 
-# Apply whole-image realism pass
 APPLY_REALISM_PASS = True
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# HELPERS
 # ---------------------------------------------------------------------------
 
-def _load_font(path: str, size: int) -> ImageFont.FreeTypeFont:
-    """Load a TTF font with fallbacks."""
+def _load_font(path: str, size: int):
     if os.path.exists(path):
         return ImageFont.truetype(path, size)
 
@@ -102,14 +98,22 @@ def _image_to_label_matrix() -> np.ndarray:
     return cv2.getPerspectiveTransform(LABEL_CORNERS, dst)
 
 
-def _sample_paper_color(base_bgr: np.ndarray) -> tuple[int, int, int]:
-    """Sample the existing label paper color from the base image."""
+def _sample_paper_color(base_bgr: np.ndarray):
+    """
+    Sample the white paper tone from clean blank areas of the label
+    in flattened label coordinates.
+    """
     M = _image_to_label_matrix()
     flat = cv2.warpPerspective(base_bgr, M, (LABEL_W, LABEL_H), flags=cv2.INTER_CUBIC)
 
     sample_points = [
-        (760, 420), (900, 395), (880, 180), (650, 335),
-        (930, 500), (600, 500), (830, 95),
+        (135, 60),
+        (910, 60),
+        (85, 185),
+        (930, 185),
+        (90, 510),
+        (920, 510),
+        (955, 290),
     ]
 
     samples = []
@@ -119,35 +123,34 @@ def _sample_paper_color(base_bgr: np.ndarray) -> tuple[int, int, int]:
             samples.append((int(r), int(g), int(b)))
 
     if not samples:
-        return (226, 228, 230)
+        return (228, 229, 232)
 
     arr = np.array(samples, dtype=np.float32)
     median = np.median(arr, axis=0)
 
     gray = median.mean()
-    final = median * 0.82 + gray * 0.18
+    final = median * 0.85 + gray * 0.15
     return tuple(int(v) for v in final)
 
 
-def _paper_patch(size: tuple[int, int], paper_rgb: tuple[int, int, int], seed: int = 9) -> Image.Image:
-    """Create a subtle photographed-paper patch with tiny texture and soft edges."""
+def _paper_patch(size, paper_rgb, seed=7):
+    """
+    Create a realistic paper patch with light texture and soft feathered edges.
+    """
     w, h = size
     rng = np.random.default_rng(seed)
 
-    base = np.zeros((h, w, 4), dtype=np.uint8)
-    base[:, :, 0] = paper_rgb[0]
-    base[:, :, 1] = paper_rgb[1]
-    base[:, :, 2] = paper_rgb[2]
+    patch = np.zeros((h, w, 4), dtype=np.uint8)
+    patch[:, :, 0] = paper_rgb[0]
+    patch[:, :, 1] = paper_rgb[1]
+    patch[:, :, 2] = paper_rgb[2]
 
-    # subtle photographed paper noise
-    noise = rng.normal(0, 1.2, (h, w, 1))
-    rgb = np.clip(base[:, :, :3].astype(np.float32) + noise, 0, 255).astype(np.uint8)
-    base[:, :, :3] = rgb
+    noise = rng.normal(0, 1.15, (h, w, 1))
+    rgb = np.clip(patch[:, :, :3].astype(np.float32) + noise, 0, 255).astype(np.uint8)
+    patch[:, :, :3] = rgb
 
-    # soft alpha edges so the patch blends better
     alpha = np.ones((h, w), dtype=np.float32) * 255.0
-    feather = 6
-
+    feather = 7
     for i in range(feather):
         a = 255.0 * ((i + 1) / feather)
         alpha[i, :] = np.minimum(alpha[i, :], a)
@@ -155,19 +158,17 @@ def _paper_patch(size: tuple[int, int], paper_rgb: tuple[int, int, int], seed: i
         alpha[:, i] = np.minimum(alpha[:, i], a)
         alpha[:, w - 1 - i] = np.minimum(alpha[:, w - 1 - i], a)
 
-    base[:, :, 3] = alpha.astype(np.uint8)
+    patch[:, :, 3] = alpha.astype(np.uint8)
+    return Image.fromarray(patch, "RGBA")
 
-    return Image.fromarray(base, "RGBA")
 
-
-def _paste_paper_rect(overlay: Image.Image, rect: tuple[int, int, int, int], paper_rgb: tuple[int, int, int], seed: int) -> None:
+def _paste_paper_rect(overlay, rect, paper_rgb, seed):
     x0, y0, x1, y1 = rect
     patch = _paper_patch((x1 - x0, y1 - y0), paper_rgb, seed=seed)
     overlay.alpha_composite(patch, (x0, y0))
 
 
-def _draw_wrapped(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, font, fill, max_width: int, line_h: int) -> int:
-    """Draw text with simple word wrapping. Returns final y."""
+def _draw_wrapped(draw, xy, text, font, fill, max_width, line_h):
     x, y = xy
     words = text.split(" ")
     line = ""
@@ -191,7 +192,7 @@ def _draw_wrapped(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, fon
 
 def normalize_tracking(tracking_number: str | None) -> str:
     """
-    Normalize to TrackFlow style: TF-XXXXXXXXXX or TF-XXXXXXXXXX-like alphanumeric code.
+    Normalize to TF-XXXXXXXXXX style but supports alphanumeric codes too.
     """
     raw = (tracking_number or "").strip().upper()
     raw = re.sub(r"[^A-Z0-9-]", "", raw)
@@ -207,41 +208,43 @@ def normalize_tracking(tracking_number: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Overlay creation
+# OVERLAY BUILDING
 # ---------------------------------------------------------------------------
 
-def build_label_overlay(recipient: dict, tracking_number: str, paper_rgb: tuple[int, int, int]) -> Image.Image:
-    """Build a transparent flat-label overlay containing only patched fields."""
+def build_label_overlay(recipient: dict, tracking_number: str, paper_rgb):
+    """
+    Build transparent overlay that patches only the dynamic areas.
+    """
     overlay = Image.new("RGBA", (LABEL_W, LABEL_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    # slightly smaller fonts so the overlay sits more naturally
-    f_head = _load_font(FONT_BOLD, 20)
-    f_text = _load_font(FONT_REG, 18)
-    f_text_bold = _load_font(FONT_BOLD, 18)
-    f_tracking = _load_font(FONT_BOLD, 20)
+    f_label = _load_font(FONT_BOLD, 19)
+    f_text = _load_font(FONT_REG, 17)
+    f_text_bold = _load_font(FONT_BOLD, 17)
+    f_tracking_label = _load_font(FONT_BOLD, 17)
+    f_tracking = _load_font(FONT_REG, 15)
 
-    # ------------------ Patch and redraw SHIP TO ------------------
+    # -------------------------------------------------------------
+    # SHIP TO block
+    # -------------------------------------------------------------
     _paste_paper_rect(overlay, SHIP_TO_RECT, paper_rgb, seed=11)
 
-    tx = 530
-    ty = 145
-    max_w = 390
-
-    draw.text((tx, ty), "SHIP TO:", font=f_head, fill=TEXT_COLOR + (255,))
-    ty += 28
+    tx = 555
+    ty = 105
+    draw.text((tx, ty), "SHIP TO:", font=f_label, fill=TEXT_COLOR + (255,))
+    ty += 24
 
     fields = [
         recipient.get("name", ""),
         recipient.get("line1", ""),
     ]
 
-    postal_code = recipient.get("line3", "")
+    postal = recipient.get("line3", "")
     city = recipient.get("line2", "")
-    if postal_code and city:
-        fields.append(f"{postal_code} {city}")
-    elif postal_code or city:
-        fields.append(postal_code or city)
+    if postal and city:
+        fields.append(f"{postal} {city}")
+    elif postal or city:
+        fields.append(postal or city)
 
     country = recipient.get("line4", "")
     if country:
@@ -251,45 +254,49 @@ def build_label_overlay(recipient: dict, tracking_number: str, paper_rgb: tuple[
         fields.append(recipient.get("phone", ""))
 
     total_chars = sum(len(x) for x in fields)
-    if len(fields) > 5 or total_chars > 105:
-        f_text_use = _load_font(FONT_REG, 16)
-        f_first_use = _load_font(FONT_BOLD, 17)
-        line_h = 20
+    if total_chars > 100 or len(fields) > 5:
+        f_text_use = _load_font(FONT_REG, 15)
+        f_text_first = _load_font(FONT_BOLD, 15)
+        line_h = 18
     else:
         f_text_use = f_text
-        f_first_use = f_text_bold
-        line_h = 22
+        f_text_first = f_text_bold
+        line_h = 20
 
+    max_w = 290
     for i, line in enumerate(fields):
         if not line:
             continue
-        font = f_first_use if i == 0 else f_text_use
+        font = f_text_first if i == 0 else f_text_use
         ty = _draw_wrapped(draw, (tx, ty), line, font, TEXT_COLOR + (255,), max_w, line_h)
 
-    # ------------------ Patch and redraw tracking number text ------------------
-    _paste_paper_rect(overlay, TRACKING_TEXT_RECT, paper_rgb, seed=12)
+    # -------------------------------------------------------------
+    # TRACKING ROW
+    # -------------------------------------------------------------
+    _paste_paper_rect(overlay, TRACKING_ROW_RECT, paper_rgb, seed=12)
 
     trk = normalize_tracking(tracking_number)
-    x0, y0, x1, y1 = TRACKING_TEXT_RECT
-    text_w = draw.textlength(trk, font=f_tracking)
-    draw.text(
-        (x0 + ((x1 - x0) - text_w) / 2, y0 + 4),
-        trk,
-        font=f_tracking,
-        fill=TEXT_COLOR + (255,)
-    )
+
+    x0, y0, x1, y1 = TRACKING_ROW_RECT
+    row_y = y0 + 18
+
+    draw.text((82, row_y), "TRACKING NO.:", font=f_tracking_label, fill=TEXT_COLOR + (255,))
+
+    # draw the tracking code to the right, subtle printed style
+    trk_x = 310
+    draw.text((trk_x, row_y), trk, font=f_tracking, fill=SUBTLE_TEXT_COLOR + (255,))
 
     return overlay
 
 
 # ---------------------------------------------------------------------------
-# Compositing
+# COMPOSITING
 # ---------------------------------------------------------------------------
 
-def warp_overlay_to_image(overlay_rgba: Image.Image, base_shape: tuple[int, int, int]) -> np.ndarray:
-    """Warp flat-label RGBA overlay to base-image perspective."""
+def warp_overlay_to_image(overlay_rgba: Image.Image, base_shape):
     h, w = base_shape[:2]
     overlay_np = np.array(overlay_rgba)
+
     M = _label_to_image_matrix()
     warped = cv2.warpPerspective(
         overlay_np,
@@ -298,41 +305,44 @@ def warp_overlay_to_image(overlay_rgba: Image.Image, base_shape: tuple[int, int,
         flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT
     )
-    # tiny blur so patched text is not too digitally crisp
-    warped = cv2.GaussianBlur(warped, (3, 3), 0.35)
+
+    # Tiny blur so the text looks printed/photo-like
+    warped = cv2.GaussianBlur(warped, (3, 3), 0.3)
     return warped
 
 
 def alpha_composite_bgr(base_bgr: np.ndarray, overlay_rgba: np.ndarray) -> np.ndarray:
-    """Composite RGBA overlay onto BGR image."""
     rgb = overlay_rgba[:, :, :3].astype(np.float32)
     alpha = (overlay_rgba[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
+
     overlay_bgr = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2BGR).astype(np.float32)
     out = base_bgr.astype(np.float32) * (1 - alpha) + overlay_bgr * alpha
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def apply_photo_realism(img_bgr: np.ndarray) -> np.ndarray:
-    """Make final output look like a slightly low-quality warehouse phone photo."""
+    """
+    Slightly degrade the image so it feels like a real warehouse phone photo.
+    """
     if not APPLY_REALISM_PASS:
         return img_bgr
 
     h, w = img_bgr.shape[:2]
 
-    # stronger blur than before, but still readable
+    # blur a little
     img = cv2.GaussianBlur(img_bgr, (5, 5), 0.75)
 
-    # slight flattening of contrast
+    # flatten contrast slightly
     img_f = img.astype(np.float32)
-    img_f = img_f * 0.975 + 128 * 0.025
+    img_f = img_f * 0.978 + 128 * 0.022
     img = np.clip(img_f, 0, 255).astype(np.uint8)
 
-    # downscale/upscale to soften details naturally
-    small = cv2.resize(img, (int(w * 0.92), int(h * 0.92)), interpolation=cv2.INTER_AREA)
+    # subtle scale softness
+    small = cv2.resize(img, (int(w * 0.94), int(h * 0.94)), interpolation=cv2.INTER_AREA)
     img = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
 
-    # JPEG compression makes it harsher when zoomed in, which helps hide flaws
-    ok, encoded = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 72])
+    # JPEG recompression adds realistic harshness on zoom
+    ok, encoded = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 74])
     if ok:
         img = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
 
@@ -340,12 +350,19 @@ def apply_photo_realism(img_bgr: np.ndarray) -> np.ndarray:
 
 
 def paste_locked_barcode_last(result_bgr: np.ndarray, base_bgr: np.ndarray) -> np.ndarray:
-    """Copy the original barcode pixels from the base photo as the final operation."""
+    """
+    Copy the original barcode pixels from the base image as the FINAL step.
+    """
     M = _label_to_image_matrix()
     x0, y0, x1, y1 = BARCODE_LOCK_RECT
+
     flat_pts = np.array([
-        [[x0, y0]], [[x1, y0]], [[x1, y1]], [[x0, y1]],
+        [[x0, y0]],
+        [[x1, y0]],
+        [[x1, y1]],
+        [[x0, y1]],
     ], dtype=np.float32)
+
     img_pts = cv2.perspectiveTransform(flat_pts, M).reshape(-1, 2).astype(np.int32)
 
     mask = np.zeros(result_bgr.shape[:2], dtype=np.uint8)
@@ -357,23 +374,10 @@ def paste_locked_barcode_last(result_bgr: np.ndarray, base_bgr: np.ndarray) -> n
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# PUBLIC API
 # ---------------------------------------------------------------------------
 
 def generate_label(recipient: dict, tracking_number: str | None = None, out_path: str | None = None):
-    """
-    recipient keys:
-        name
-        line1 = street
-        line2 = city
-        line3 = postal code
-        line4 = country/country code
-        phone optional
-
-    tracking_number examples:
-        "Q8ZH7PDVRH" -> "TF-Q8ZH7PDVRH"
-        "TF-Q8ZH7PDVRH" -> "TF-Q8ZH7PDVRH"
-    """
     base_bgr = cv2.imread(BASE_IMAGE_PATH)
     if base_bgr is None:
         raise FileNotFoundError(BASE_IMAGE_PATH)
@@ -384,10 +388,10 @@ def generate_label(recipient: dict, tracking_number: str | None = None, out_path
 
     result_bgr = alpha_composite_bgr(base_bgr, warped_overlay)
 
-    # Global realism BEFORE locking barcode
+    # Apply global realism before locking barcode
     result_bgr = apply_photo_realism(result_bgr)
 
-    # Final step: locked barcode from base image
+    # Final step: restore original barcode
     result_bgr = paste_locked_barcode_last(result_bgr, base_bgr)
 
     result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
@@ -411,8 +415,9 @@ if __name__ == "__main__":
             "line2": "Bad Mergentheim",
             "line3": "97980",
             "line4": "DE",
+            "phone": ""
         },
-        tracking_number="Q8ZH7PDVRH",
+        tracking_number="TF-Q8ZH7PDVRH",
         out_path="test_heybike_output.png",
     )
     print("done", img.size)
