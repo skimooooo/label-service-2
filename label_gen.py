@@ -4,11 +4,11 @@ Improved version for the warehouse-floor HEYBIKE base photo.
 
 This version:
 - loads base.png from the same folder as label_gen.py
-- replaces the full small/blurry label with a cleaner slightly larger label
+- replaces the full small/blurry label with a cleaner realistic label
+- uses a smaller label size so it fits the package better
 - keeps the same realistic perspective on the box
 - keeps barcode static across generations
 - generates clean SHIP FROM / SHIP TO / tracking content
-- avoids the ugly patch look
 """
 
 import os
@@ -32,13 +32,13 @@ ORIGINAL_LABEL_CORNERS = np.array([
     [608, 314],
 ], dtype=np.float32)
 
-# New slightly larger label position.
-# This makes the label cleaner and easier to read.
+# Smaller final label position.
+# This fixes the oversized label issue.
 LABEL_CORNERS = np.array([
-    [594, 182],
-    [935, 181],
-    [968, 338],
-    [562, 337],
+    [626, 195],
+    [904, 194],
+    [931, 323],
+    [599, 322],
 ], dtype=np.float32)
 
 LABEL_W = 1000
@@ -52,7 +52,6 @@ TEXT_COLOR = (25, 25, 28)
 MUTED_TEXT = (80, 80, 85)
 LINE_COLOR = (85, 85, 90)
 
-# Fixed sender
 SHIP_FROM_LINES = [
     "TrackFlow LTD",
     "2820 N Pulaski Rd",
@@ -89,6 +88,7 @@ def _flat_to_image_matrix(corners: np.ndarray) -> np.ndarray:
         [LABEL_W, LABEL_H],
         [0, LABEL_H],
     ], dtype=np.float32)
+
     return cv2.getPerspectiveTransform(src, corners)
 
 
@@ -99,6 +99,7 @@ def _image_to_flat_matrix(corners: np.ndarray) -> np.ndarray:
         [LABEL_W, LABEL_H],
         [0, LABEL_H],
     ], dtype=np.float32)
+
     return cv2.getPerspectiveTransform(corners, dst)
 
 
@@ -129,8 +130,6 @@ def _sample_paper_color(base_bgr: np.ndarray):
 
     gray = med.mean()
     final = med * 0.88 + gray * 0.12
-
-    # keep it close to white paper
     final = np.clip(final + 8, 210, 245)
 
     return tuple(int(v) for v in final)
@@ -157,6 +156,7 @@ def _draw_wrapped(draw, xy, text, font, fill, max_width, line_h):
 
     for word in words:
         test = (line + " " + word).strip()
+
         if draw.textlength(test, font=font) <= max_width:
             line = test
         else:
@@ -184,8 +184,6 @@ def _crop_static_barcode(base_bgr: np.ndarray) -> Image.Image:
         flags=cv2.INTER_CUBIC
     )
 
-    # Barcode source area inside the original flattened label.
-    # Crops mostly the barcode bars, not the whole label.
     x0, y0, x1, y1 = 105, 370, 930, 510
     crop = flat[y0:y1, x0:x1]
 
@@ -194,20 +192,19 @@ def _crop_static_barcode(base_bgr: np.ndarray) -> Image.Image:
 
 
 def _make_fallback_barcode(width: int, height: int) -> Image.Image:
-    """
-    Fallback if the source barcode crop is unusable.
-    Static fake barcode, same every time.
-    """
     img = Image.new("RGB", (width, height), (235, 236, 238))
     draw = ImageDraw.Draw(img)
 
     rng = np.random.default_rng(22)
     x = 8
+
     while x < width - 8:
         bar_w = int(rng.integers(2, 6))
         gap = int(rng.integers(1, 4))
+
         if rng.random() > 0.18:
             draw.rectangle([x, 6, x + bar_w, height - 8], fill=(25, 25, 25))
+
         x += bar_w + gap
 
     return img
@@ -222,7 +219,6 @@ def build_full_label(base_bgr: np.ndarray, recipient: dict, tracking_number: str
 
     rng = np.random.default_rng(5)
 
-    # paper texture
     paper = np.zeros((LABEL_H, LABEL_W, 3), dtype=np.uint8)
     paper[:, :, 0] = paper_rgb[0]
     paper[:, :, 1] = paper_rgb[1]
@@ -234,29 +230,29 @@ def build_full_label(base_bgr: np.ndarray, recipient: dict, tracking_number: str
     label = Image.fromarray(paper, "RGB")
     draw = ImageDraw.Draw(label)
 
-    f_brand = _load_font(FONT_BOLD, 42)
-    f_small = _load_font(FONT_REG, 18)
-    f_label = _load_font(FONT_BOLD, 24)
-    f_text = _load_font(FONT_REG, 23)
-    f_text_bold = _load_font(FONT_BOLD, 23)
-    f_tracking_label = _load_font(FONT_BOLD, 23)
-    f_tracking = _load_font(FONT_BOLD, 23)
+    f_brand = _load_font(FONT_BOLD, 38)
+    f_small = _load_font(FONT_REG, 17)
+    f_label = _load_font(FONT_BOLD, 22)
+    f_text = _load_font(FONT_REG, 21)
+    f_text_bold = _load_font(FONT_BOLD, 21)
+    f_tracking_label = _load_font(FONT_BOLD, 21)
+    f_tracking = _load_font(FONT_BOLD, 21)
 
     margin = 46
     right = LABEL_W - margin
 
     # Header
-    draw.text((margin, 30), "TrackFlow", font=f_brand, fill=TEXT_COLOR)
+    draw.text((margin, 28), "TrackFlow", font=f_brand, fill=TEXT_COLOR)
 
     one = "1 of 1"
     one_w = draw.textlength(one, font=f_small)
-    draw.text((right - one_w, 44), one, font=f_small, fill=MUTED_TEXT)
+    draw.text((right - one_w, 42), one, font=f_small, fill=MUTED_TEXT)
 
-    draw.line((margin, 88, right, 88), fill=LINE_COLOR, width=3)
+    draw.line((margin, 84, right, 84), fill=LINE_COLOR, width=3)
 
-    # Two columns
-    col_top = 112
-    col_bottom = 292
+    # Columns
+    col_top = 106
+    col_bottom = 284
     split_x = LABEL_W // 2
 
     draw.line((split_x, col_top - 8, split_x, col_bottom), fill=LINE_COLOR, width=2)
@@ -266,17 +262,17 @@ def build_full_label(base_bgr: np.ndarray, recipient: dict, tracking_number: str
     x_from = margin
     y = col_top
     draw.text((x_from, y), "SHIP FROM:", font=f_label, fill=TEXT_COLOR)
-    y += 34
+    y += 32
 
     for line in SHIP_FROM_LINES:
         draw.text((x_from, y), line, font=f_text, fill=TEXT_COLOR)
-        y += 29
+        y += 27
 
     # SHIP TO
     x_to = split_x + 34
     y = col_top
     draw.text((x_to, y), "SHIP TO:", font=f_label, fill=TEXT_COLOR)
-    y += 34
+    y += 32
 
     fields = [
         recipient.get("name", ""),
@@ -300,7 +296,7 @@ def build_full_label(base_bgr: np.ndarray, recipient: dict, tracking_number: str
         fields.append(phone)
 
     max_w = right - x_to
-    line_h = 29
+    line_h = 27
 
     for i, line in enumerate(fields):
         if not line:
@@ -310,7 +306,7 @@ def build_full_label(base_bgr: np.ndarray, recipient: dict, tracking_number: str
         y = _draw_wrapped(draw, (x_to, y), line, font, TEXT_COLOR, max_w, line_h)
 
     # Tracking section
-    y_track = 320
+    y_track = 310
     draw.text((margin, y_track), "TRACKING NUMBER:", font=f_tracking_label, fill=TEXT_COLOR)
 
     trk = normalize_tracking(tracking_number)
@@ -318,7 +314,7 @@ def build_full_label(base_bgr: np.ndarray, recipient: dict, tracking_number: str
     draw.text((right - trk_w, y_track), trk, font=f_tracking, fill=TEXT_COLOR)
 
     # Barcode
-    barcode_target = (80, 365, 790, 470)
+    barcode_target = (80, 355, 790, 455)
     barcode_w = barcode_target[2] - barcode_target[0]
     barcode_h = barcode_target[3] - barcode_target[1]
 
@@ -330,8 +326,7 @@ def build_full_label(base_bgr: np.ndarray, recipient: dict, tracking_number: str
 
     label.paste(barcode, (barcode_target[0], barcode_target[1]))
 
-    # Bottom subtle line
-    draw.line((margin, 492, right, 492), fill=(125, 125, 128), width=2)
+    draw.line((margin, 486, right, 486), fill=(125, 125, 128), width=2)
 
     return label
 
@@ -364,6 +359,7 @@ def warp_and_composite(base_bgr: np.ndarray, label_img: Image.Image) -> np.ndarr
     )
 
     mask = np.ones((LABEL_H, LABEL_W), dtype=np.uint8) * 255
+
     warped_mask = cv2.warpPerspective(
         mask,
         M,
@@ -372,16 +368,18 @@ def warp_and_composite(base_bgr: np.ndarray, label_img: Image.Image) -> np.ndarr
         borderMode=cv2.BORDER_CONSTANT
     )
 
-    # subtle soft edge, not too much
     warped_mask = cv2.GaussianBlur(warped_mask, (5, 5), 1.1)
     alpha = (warped_mask.astype(np.float32) / 255.0)[:, :, None]
 
-    # subtle shadow under label
+    # Soft shadow under the label
     shadow_mask = cv2.GaussianBlur(warped_mask, (13, 13), 4)
-    shadow_alpha = (shadow_mask.astype(np.float32) / 255.0)[:, :, None] * 0.10
+    shadow_alpha = (shadow_mask.astype(np.float32) / 255.0)[:, :, None] * 0.08
 
-    darkened = base_bgr.astype(np.float32) * (1 - shadow_alpha)
-    base_shadow = np.clip(darkened, 0, 255).astype(np.uint8)
+    base_shadow = np.clip(
+        base_bgr.astype(np.float32) * (1 - shadow_alpha),
+        0,
+        255
+    ).astype(np.uint8)
 
     out = base_shadow.astype(np.float32) * (1 - alpha) + warped_label.astype(np.float32) * alpha
     out = np.clip(out, 0, 255).astype(np.uint8)
@@ -390,12 +388,10 @@ def warp_and_composite(base_bgr: np.ndarray, label_img: Image.Image) -> np.ndarr
 
 
 def apply_final_realism(img_bgr: np.ndarray) -> np.ndarray:
-    """
-    Light realism only. Not heavy blur.
-    """
-    img = cv2.GaussianBlur(img_bgr, (3, 3), 0.12)
+    img = cv2.GaussianBlur(img_bgr, (3, 3), 0.10)
 
     ok, encoded = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 91])
+
     if ok:
         img = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
 
