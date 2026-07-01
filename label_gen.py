@@ -12,7 +12,7 @@ as the final operation.
 
 Added:
 - Render-safe base.png path
-- final crop for email preview
+- tighter final crop for email preview
 """
 
 import os
@@ -403,19 +403,30 @@ def paste_locked_barcode_last(
 
 def crop_for_email(img_bgr: np.ndarray) -> np.ndarray:
     """
-    Final crop for the HEYBIKE email image.
-
-    This keeps the label and HEYBIKE box visible,
-    while removing extra empty background.
+    Tighter crop so the final image looks like your target:
+    - less empty side space
+    - less bottom area
+    - keeps label + HEYBIKE logo visible
     """
+
     h, w = img_bgr.shape[:2]
 
-    x1 = int(w * 0.12)
-    y1 = int(h * 0.06)
-    x2 = int(w * 0.86)
-    y2 = int(h * 0.89)
+    # Use the label position as anchor for a more reliable crop
+    label_min_x = int(np.min(LABEL_CORNERS[:, 0]))
+    label_max_x = int(np.max(LABEL_CORNERS[:, 0]))
+    label_min_y = int(np.min(LABEL_CORNERS[:, 1]))
+    label_max_y = int(np.max(LABEL_CORNERS[:, 1]))
 
-    return img_bgr[y1:y2, x1:x2]
+    # Tighter crop than before
+    x1 = max(0, label_min_x - 170)
+    x2 = min(w, label_max_x + 120)
+
+    y1 = max(0, label_min_y - 55)
+    y2 = min(h, label_max_y + 250)
+
+    cropped = img_bgr[y1:y2, x1:x2]
+
+    return cropped
 
 
 # ---------------------------------------------------------------------------
